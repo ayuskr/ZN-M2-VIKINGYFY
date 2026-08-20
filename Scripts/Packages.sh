@@ -100,7 +100,7 @@ UPDATE_PACKAGE \
 # Gecoosac
 UPDATE_PACKAGE \
 	"gecoosac" \
-	"lwb1978/openwrt-gecoosac" \
+	"laipeng668/luci-app-gecoosac" \
 	"main"
 
 # microsocks is provided by the official OpenWrt packages feed.
