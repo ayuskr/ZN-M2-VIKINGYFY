@@ -172,31 +172,13 @@ jobs:
         if: env.WRT_TEST != 'true'
         uses: actions/cache@v4
         with:
-          key: wrt-v3-${{ env.WRT_CONFIG }}-${{ env.WRT_INFO }}-${{ env.WRT_HASH }}
+          key: wrt-v4-${{ env.WRT_CONFIG }}-${{ env.WRT_INFO }}-${{ env.WRT_HASH }}
           restore-keys: |
-            wrt-v3-${{ env.WRT_CONFIG }}-${{ env.WRT_INFO }}-
-            wrt-v3-${{ env.WRT_CONFIG }}-
+            wrt-v4-${{ env.WRT_CONFIG }}-${{ env.WRT_INFO }}-
+            wrt-v4-${{ env.WRT_CONFIG }}-
           path: |
             ./wrt/.ccache
             ./wrt/dl
-
-      - name: Clean Host Build State
-        run: |
-          set -Eeuo pipefail
-          cd ./wrt/
-
-          echo "==== Clean stale host build state ===="
-
-          rm -rf \
-            ./staging_dir/host \
-            ./staging_dir/hostpkg \
-            ./build_dir/host \
-            ./build_dir/hostpkg \
-            ./tmp
-
-          mkdir -p ./tmp
-
-          echo "Host build state cleaned."
 
       - name: Update Feeds
         run: |
@@ -240,7 +222,7 @@ jobs:
           CONFIG_FILE="$GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt"
           GENERAL_FILE="$GITHUB_WORKSPACE/Config/GENERAL2.txt"
 
-          rm -f .config
+          rm -f .config .config.tmp .config.invalid
 
           if [[ "${WRT_CONFIG,,}" == *"test"* ]]; then
             cat "$CONFIG_FILE" > .config
@@ -392,7 +374,7 @@ jobs:
           rm -f .config.invalid
           echo "No invalid .config lines found."
 
-          echo "==== Ensure LuCI theme source ===="
+          echo "==== Verify Aurora source ===="
 
           AURORA_MAKEFILE="$(
             find ./package \
@@ -414,6 +396,8 @@ jobs:
           fi
 
           echo "Aurora Makefile: $AURORA_MAKEFILE"
+
+          echo "==== Generate final configuration ===="
 
           make defconfig
 
@@ -443,6 +427,8 @@ jobs:
             '^CONFIG_PACKAGE_(luci-theme-aurora|luci-app-passwall|luci-app-lucky|lucky|luci-app-mosdns|mosdns|luci-app-gecoosac|gecoosac|luci-app-microsocks|microsocks)=y$' \
             .config || true
 
+          echo "==== Clean target package build state ===="
+
           make clean -j"$(nproc)"
 
       - name: Download Packages
@@ -453,99 +439,13 @@ jobs:
 
           make download -j"$(nproc)"
 
+          echo "==== Remove invalid download files ===="
+
           find ./dl \
             -type f \
             -size -1024c \
             -print \
             -delete || true
-
-      - name: Prepare Host Build Tools
-        if: env.WRT_TEST != 'true'
-        run: |
-          set -Eeuo pipefail
-          cd ./wrt/
-
-          echo "==== Build host tools ===="
-
-          make tools/install -j"$(nproc)" || \
-            make tools/install -j1 V=s
-
-          echo "==== Check host sed ===="
-
-          if [ ! -x ./staging_dir/host/bin/sed ]; then
-            echo "Host sed is missing. Rebuilding host tools."
-
-            rm -rf \
-              ./staging_dir/host \
-              ./staging_dir/hostpkg \
-              ./build_dir/host \
-              ./build_dir/hostpkg \
-              ./tmp
-
-            mkdir -p ./tmp
-
-            make tools/install -j1 V=s
-          fi
-
-          if [ ! -x ./staging_dir/host/bin/sed ]; then
-            echo "ERROR: host sed was not generated."
-
-            find ./staging_dir \
-              -maxdepth 5 \
-              -type f \
-              -name sed \
-              -print 2>/dev/null || true
-
-            exit 1
-          fi
-
-          HOST_SED_PATH="$(readlink -f ./staging_dir/host/bin/sed)"
-
-          echo "Host sed: $HOST_SED_PATH"
-          ./staging_dir/host/bin/sed --version | head -n 1 || true
-
-      - name: Compile Aurora Theme
-        if: env.WRT_TEST != 'true'
-        run: |
-          set -Eeuo pipefail
-          cd ./wrt/
-
-          echo "==== Verify host sed before compiling Aurora ===="
-
-          if [ ! -x ./staging_dir/host/bin/sed ]; then
-            echo "ERROR: host sed is missing before Aurora compilation."
-            exit 1
-          fi
-
-          echo "==== Compile luci-theme-aurora ===="
-
-          make package/luci-theme-aurora/compile -j1 V=s
-
-          echo "==== Aurora package output ===="
-
-          AURORA_APK="$(
-            find ./bin \
-              -type f \
-              -iname 'luci-theme-aurora*.apk' \
-              -print \
-              -quit
-          )"
-
-          if [ -z "$AURORA_APK" ]; then
-            echo "ERROR: luci-theme-aurora APK was not generated."
-
-            find ./bin \
-              -type f \
-              \( \
-                -iname '*aurora*' \
-                -o -iname '*theme*.apk' \
-              \) \
-              -print || true
-
-            exit 1
-          fi
-
-          echo "Generated package: $AURORA_APK"
 
       - name: Compile Firmware
         if: env.WRT_TEST != 'true'
@@ -553,7 +453,106 @@ jobs:
           set -o pipefail
           cd ./wrt/
 
+          echo "==== Compile complete firmware ===="
+
           make -j"$(nproc)" || make -j1 V=s
+
+      - name: Verify Build Results
+        if: env.WRT_TEST != 'true'
+        run: |
+          set -Eeuo pipefail
+          cd ./wrt/
+
+          echo "==== Verify host tools ===="
+
+          if [ ! -x ./staging_dir/host/bin/sed ]; then
+            echo "ERROR: host sed was not generated."
+            exit 1
+          fi
+
+          echo "Host sed: $(readlink -f ./staging_dir/host/bin/sed)"
+
+          echo "==== Verify target toolchain ===="
+
+          TOOLCHAIN_LIBGCC="$(
+            find ./staging_dir \
+              -type f \
+              -path '*/toolchain-*/lib/libgcc_s.so.*' \
+              -print \
+              -quit
+          )"
+
+          if [ -z "$TOOLCHAIN_LIBGCC" ]; then
+            echo "ERROR: target toolchain libgcc_s.so was not generated."
+
+            find ./staging_dir \
+              -maxdepth 4 \
+              -type f \
+              -name 'libgcc_s.so*' \
+              -print || true
+
+            exit 1
+          fi
+
+          echo "Toolchain libgcc: $TOOLCHAIN_LIBGCC"
+
+          echo "==== Verify Aurora package ===="
+
+          AURORA_PACKAGE="$(
+            find ./bin \
+              -type f \
+              \( \
+                -iname 'luci-theme-aurora*.apk' \
+                -o -iname 'luci-theme-aurora*.ipk' \
+              \) \
+              -print \
+              -quit
+          )"
+
+          if [ -z "$AURORA_PACKAGE" ]; then
+            echo "ERROR: luci-theme-aurora package was not generated."
+
+            find ./bin \
+              -type f \
+              \( \
+                -iname '*aurora*' \
+                -o -iname '*theme*.apk' \
+                -o -iname '*theme*.ipk' \
+              \) \
+              -print || true
+
+            exit 1
+          fi
+
+          echo "Aurora package: $AURORA_PACKAGE"
+
+          echo "==== Verify firmware files ===="
+
+          FIRMWARE_FILE="$(
+            find ./bin/targets \
+              -type f \
+              \( \
+                -name '*.bin' \
+                -o -name '*.img' \
+                -o -name '*.ubi' \
+                -o -name '*.itb' \
+              \) \
+              -print \
+              -quit
+          )"
+
+          if [ -z "$FIRMWARE_FILE" ]; then
+            echo "ERROR: no firmware image was generated."
+
+            find ./bin/targets \
+              -maxdepth 4 \
+              -type f \
+              -print || true
+
+            exit 1
+          fi
+
+          echo "Firmware file: $FIRMWARE_FILE"
 
       - name: Machine Information
         if: always()
@@ -575,7 +574,8 @@ jobs:
           set -Eeuo pipefail
           cd ./wrt/
 
-          mkdir -p ./upload/
+          rm -rf ./upload
+          mkdir -p ./upload
 
           cp -f \
             ./.config \
@@ -583,7 +583,7 @@ jobs:
 
           if [[ "$WRT_TEST" != "true" ]]; then
             WRT_KVER_VALUE="$(
-              find ./bin/targets/ \
+              find ./bin/targets \
                 -type f \
                 -name "*.manifest" \
                 -exec grep -h -oP '^kernel - \K[\d.]+' {} \; |
@@ -591,7 +591,7 @@ jobs:
             )"
 
             WRT_LIST_VALUE="$(
-              find ./bin/targets/ \
+              find ./bin/targets \
                 -type f \
                 -name "*.manifest" \
                 -exec grep -h -oP '^luci-(app|theme)[^ ]*' {} \; |
@@ -604,7 +604,9 @@ jobs:
               echo "WRT_LIST=${WRT_LIST_VALUE:-none}"
             } >> "$GITHUB_ENV"
 
-            find ./bin/targets/ \
+            echo "==== Remove unnecessary target metadata ===="
+
+            find ./bin/targets \
               -type f \
               \( \
                 -name "*.buildinfo" \
@@ -613,6 +615,8 @@ jobs:
                 -o -name "*.packages" \
               \) \
               -delete
+
+            echo "==== Rename target firmware files ===="
 
             while IFS= read -r FILE; do
               [ -z "$FILE" ] && continue
@@ -644,16 +648,16 @@ jobs:
 
               mv -f "$FILE" "./upload/$NEW_FILE"
             done < <(
-              find ./bin/targets/ \
+              find ./bin/targets \
                 -type f \
                 -iname "*$WRT_TARGET*"
             )
 
-            find ./bin/targets/ \
+            echo "==== Move remaining target files ===="
+
+            find ./bin/targets \
               -type f \
               -exec mv -f {} ./upload/ \;
-
-            make clean -j"$(nproc)"
           fi
 
           echo "==== Upload files ===="
@@ -662,6 +666,16 @@ jobs:
             -maxdepth 1 \
             -type f \
             -printf '%f\n'
+
+          if ! find ./upload \
+            -maxdepth 1 \
+            -type f \
+            -print \
+            -quit |
+            grep -q .; then
+            echo "ERROR: upload directory is empty."
+            exit 1
+          fi
 
       - name: Release Firmware
         if: success()
