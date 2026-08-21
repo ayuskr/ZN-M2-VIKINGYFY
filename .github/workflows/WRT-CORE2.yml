@@ -1,4 +1,4 @@
-#云编译公用核心
+# 云编译公用核心
 name: WRT-CORE
 
 on:
@@ -37,29 +37,32 @@ on:
       WRT_PACKAGE:
         required: false
         type: string
+        default: ""
       WRT_TEST:
         required: false
         type: string
+        default: "false"
 
 env:
-  GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
-  WRT_CONFIG: ${{inputs.WRT_CONFIG}}
-  WRT_THEME: ${{inputs.WRT_THEME}}
-  WRT_NAME: ${{inputs.WRT_NAME}}
-  WRT_SSID: ${{inputs.WRT_SSID}}
-  WRT_WORD: ${{inputs.WRT_WORD}}
-  WRT_IP: ${{inputs.WRT_IP}}
-  WRT_PW: ${{inputs.WRT_PW}}
-  WRT_REPO: ${{inputs.WRT_REPO}}
-  WRT_BRANCH: ${{inputs.WRT_BRANCH}}
-  WRT_SOURCE: ${{inputs.WRT_SOURCE}}
-  WRT_PACKAGE: ${{inputs.WRT_PACKAGE}}
-  WRT_TEST: ${{inputs.WRT_TEST}}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  WRT_CONFIG: ${{ inputs.WRT_CONFIG }}
+  WRT_THEME: ${{ inputs.WRT_THEME }}
+  WRT_NAME: ${{ inputs.WRT_NAME }}
+  WRT_SSID: ${{ inputs.WRT_SSID }}
+  WRT_WORD: ${{ inputs.WRT_WORD }}
+  WRT_IP: ${{ inputs.WRT_IP }}
+  WRT_PW: ${{ inputs.WRT_PW }}
+  WRT_REPO: ${{ inputs.WRT_REPO }}
+  WRT_BRANCH: ${{ inputs.WRT_BRANCH }}
+  WRT_SOURCE: ${{ inputs.WRT_SOURCE }}
+  WRT_PACKAGE: ${{ inputs.WRT_PACKAGE }}
+  WRT_TEST: ${{ inputs.WRT_TEST }}
 
 jobs:
   core:
-    name: ${{inputs.WRT_SOURCE}}
+    name: ${{ inputs.WRT_SOURCE }}
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout Projects
         uses: actions/checkout@main
@@ -68,53 +71,107 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo -E apt -yqq purge firefox
+          set -e
+
+          sudo -E apt -yqq purge firefox || true
           sudo -E apt -yqq update
           sudo -E apt -yqq full-upgrade
           sudo -E apt -yqq autoremove --purge
           sudo -E apt -yqq autoclean
           sudo -E apt -yqq clean
-          sudo -E apt -yqq install dos2unix python3-netifaces libfuse-dev
-          sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+
+          sudo -E apt -yqq install \
+            dos2unix \
+            python3-netifaces \
+            libfuse-dev
+
+          sudo bash -c \
+            'bash <(curl -fsSL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+
           sudo -E systemctl daemon-reload
           sudo -E timedatectl set-timezone "Asia/Shanghai"
 
           sudo mkdir -p /mnt/build_wrt
-          sudo chown $USER:$USER /mnt/build_wrt
-          sudo ln -s /mnt/build_wrt $GITHUB_WORKSPACE/wrt
+          sudo chown "$USER:$USER" /mnt/build_wrt
+
+          rm -rf "$GITHUB_WORKSPACE/wrt"
+          ln -s /mnt/build_wrt "$GITHUB_WORKSPACE/wrt"
 
       - name: Initialization Values
         run: |
-          echo "WRT_DATE=$(TZ=UTC-8 date +"%y.%m.%d-%H.%M.%S")" >> $GITHUB_ENV
-          echo "WRT_MARK=${GITHUB_REPOSITORY%%/*}" >> $GITHUB_ENV
-          echo "WRT_INFO=${WRT_SOURCE%%/*}" >> $GITHUB_ENV
-          echo "WRT_TARGET=$(grep -m 1 -oP '^CONFIG_TARGET_\K[\w]+(?=\=y)' ./Config/$WRT_CONFIG.txt)" >> $GITHUB_ENV
-          echo "WRT_KVER=none" >> $GITHUB_ENV
-          echo "WRT_LIST=none" >> $GITHUB_ENV
+          set -e
+
+          CONFIG_FILE="$GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt"
+
+          if [ ! -f "$CONFIG_FILE" ]; then
+            echo "ERROR: configuration file does not exist: $CONFIG_FILE"
+            exit 1
+          fi
+
+          WRT_TARGET_VALUE="$(
+            grep -m 1 -oP '^CONFIG_TARGET_\K[\w]+(?=\=y)' \
+              "$CONFIG_FILE" || true
+          )"
+
+          if [ -z "$WRT_TARGET_VALUE" ]; then
+            echo "ERROR: unable to detect target from $CONFIG_FILE"
+            exit 1
+          fi
+
+          {
+            echo "WRT_DATE=$(TZ=UTC-8 date +'%y.%m.%d-%H.%M.%S')"
+            echo "WRT_MARK=${GITHUB_REPOSITORY%%/*}"
+            echo "WRT_INFO=${WRT_SOURCE%%/*}"
+            echo "WRT_TARGET=$WRT_TARGET_VALUE"
+            echo "WRT_KVER=none"
+            echo "WRT_LIST=none"
+          } >> "$GITHUB_ENV"
 
       - name: Clone Code
         run: |
-          git clone --depth=1 --single-branch --branch $WRT_BRANCH $WRT_REPO ./wrt/
+          set -e
 
-          cd ./wrt/ && echo "WRT_HASH=$(git log -1 --pretty=format:'%h')" >> $GITHUB_ENV
+          git clone \
+            --depth=1 \
+            --single-branch \
+            --branch "$WRT_BRANCH" \
+            "$WRT_REPO" \
+            ./wrt/
 
-          # GitHub Action 移除国内下载源
+          cd ./wrt/
+
+          echo "WRT_HASH=$(git log -1 --pretty=format:'%h')" \
+            >> "$GITHUB_ENV"
+
           PROJECT_MIRRORS_FILE="./scripts/projectsmirrors.json"
+
           if [ -f "$PROJECT_MIRRORS_FILE" ]; then
-            sed -i '/.cn\//d; /tencent/d; /aliyun/d' "$PROJECT_MIRRORS_FILE"
+            sed -i \
+              -e '/\.cn\//d' \
+              -e '/tencent/d' \
+              -e '/aliyun/d' \
+              "$PROJECT_MIRRORS_FILE"
           fi
 
       - name: Check Scripts
         run: |
-          find ./ -maxdepth 3 -type f -iregex ".*\(txt\|sh\)$" -exec dos2unix {} \; -exec chmod +x {} \;
+          set -e
+
+          find "$GITHUB_WORKSPACE" \
+            -maxdepth 3 \
+            -type f \
+            -iregex '.*\(txt\|sh\)$' \
+            -exec dos2unix {} \; \
+            -exec chmod +x {} \;
 
       - name: Check Caches
         id: check-cache
         if: env.WRT_TEST != 'true'
         uses: actions/cache@main
         with:
-          key: ${{env.WRT_CONFIG}}-${{env.WRT_INFO}}-${{env.WRT_HASH}}
-          restore-keys: ${{env.WRT_CONFIG}}-${{env.WRT_INFO}}
+          key: ${{ env.WRT_CONFIG }}-${{ env.WRT_INFO }}-${{ env.WRT_HASH }}
+          restore-keys: |
+            ${{ env.WRT_CONFIG }}-${{ env.WRT_INFO }}
           path: |
             ./wrt/.ccache
             ./wrt/staging_dir/host*
@@ -123,84 +180,280 @@ jobs:
       - name: Update Caches
         if: env.WRT_TEST != 'true'
         run: |
+          set -e
+
           if [ -d "./wrt/staging_dir" ]; then
-            find "./wrt/staging_dir" -type d -name "stamp" -not -path "*target*" | while read -r DIR; do
+            find "./wrt/staging_dir" \
+              -type d \
+              -name "stamp" \
+              -not -path "*target*" |
+            while IFS= read -r DIR; do
               find "$DIR" -type f -exec touch {} +
             done
 
-            mkdir -p ./wrt/tmp && echo "1" > ./wrt/tmp/.build
+            mkdir -p ./wrt/tmp
+            printf '%s\n' "1" > ./wrt/tmp/.build
 
-            echo "toolchain skiped done!"
+            echo "Toolchain cache restored."
           else
-            echo "caches missed!"
+            echo "Toolchain cache not found."
           fi
 
-          if ${{steps.check-cache.outputs.cache-hit != 'true'}}; then
-            CACHE_LIST=$(gh cache list --key "$WRT_CONFIG-$WRT_INFO" | cut -f 1)
-            for CACHE_KEY in $CACHE_LIST; do
-              gh cache delete $CACHE_KEY
-            done
+          if [ "${{ steps.check-cache.outputs.cache-hit }}" != "true" ]; then
+            CACHE_LIST="$(
+              gh cache list \
+                --key "$WRT_CONFIG-$WRT_INFO" \
+                --limit 100 \
+                --json key \
+                --jq '.[].key' || true
+            )"
 
-            echo "caches cleanup done!"
+            while IFS= read -r CACHE_KEY; do
+              [ -z "$CACHE_KEY" ] && continue
+              gh cache delete "$CACHE_KEY" || true
+            done <<< "$CACHE_LIST"
+
+            echo "Old caches cleaned."
           fi
 
       - name: Update Feeds
         run: |
+          set -e
           cd ./wrt/
 
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+
+      - name: Custom Packages
+        run: |
+          set -e
+          cd ./wrt/package/
+
+          "$GITHUB_WORKSPACE/Scripts/Packages.sh"
+          "$GITHUB_WORKSPACE/Scripts/Handles.sh"
+
+          echo "==== Third-party package directories ===="
+          find . \
+            -maxdepth 4 \
+            -type f \
+            -name Makefile \
+            \( \
+              -path '*luci-theme-aurora*' \
+              -o -path '*luci-app-passwall*' \
+              -o -path '*luci-app-lucky*' \
+              -o -path '*luci-app-mosdns*' \
+              -o -path '*luci-app-gecoosac*' \
+            \) \
+            -print || true
 
       - name: Custom Settings
         run: |
           set -e
           cd ./wrt/
 
+          CONFIG_FILE="$GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt"
+          GENERAL_FILE="$GITHUB_WORKSPACE/Config/GENERAL2.txt"
+
+          rm -f .config
+
           if [[ "${WRT_CONFIG,,}" == *"test"* ]]; then
-            cat "$GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt" >> .config
+            cat "$CONFIG_FILE" > .config
           else
-            cat \
-              "$GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt" \
-              "$GITHUB_WORKSPACE/Config/GENERAL2.txt" \
-              >> .config
+            if [ ! -f "$GENERAL_FILE" ]; then
+              echo "ERROR: general configuration does not exist: $GENERAL_FILE"
+              exit 1
+            fi
+
+            cat "$CONFIG_FILE" "$GENERAL_FILE" > .config
           fi
 
           "$GITHUB_WORKSPACE/Scripts/Settings.sh"
 
-          # 删除 Settings.sh 或配置文件写入的固件编译者标识
-          sed -i '/^CONFIG_VERSION_CODE=/d' .config
+          # Remove raw package names previously written by Settings.sh.
+          # The package input is converted to valid Kconfig entries below.
+          if [ -n "${WRT_PACKAGE:-}" ]; then
+            NORMALIZED_PACKAGES="$(
+              printf '%s\n' "$WRT_PACKAGE" |
+                tr ',;~' '\n\n\n' |
+                sed 's/\r$//'
+            )"
+
+            while IFS= read -r PACKAGE; do
+              PACKAGE="$(
+                printf '%s' "$PACKAGE" |
+                  sed -e 's/^[[:space:]]*//' \
+                      -e 's/[[:space:]]*$//'
+              )"
+
+              [ -z "$PACKAGE" ] && continue
+
+              case "$PACKAGE" in
+                \#*)
+                  continue
+                  ;;
+              esac
+
+              if ! printf '%s' "$PACKAGE" |
+                grep -Eq '^[A-Za-z0-9][A-Za-z0-9._+-]*$'; then
+                echo "ERROR: invalid package name: $PACKAGE"
+                exit 1
+              fi
+
+              sed -i \
+                -e "\|^${PACKAGE}$|d" \
+                -e "\|^CONFIG_PACKAGE_${PACKAGE}=|d" \
+                -e "\|^# CONFIG_PACKAGE_${PACKAGE} is not set$|d" \
+                .config
+
+              printf 'CONFIG_PACKAGE_%s=y\n' "$PACKAGE" >> .config
+              echo "Enabled manual package: $PACKAGE"
+            done <<< "$NORMALIZED_PACKAGES"
+          fi
+
+          # Remove builder name and build date from the LuCI firmware version.
+          sed -i \
+            -e '/^CONFIG_VERSION_CODE=/d' \
+            -e '/^# CONFIG_VERSION_CODE is not set$/d' \
+            .config
+
           printf '%s\n' 'CONFIG_VERSION_CODE=""' >> .config
 
-          echo "==== Firmware version settings before defconfig ===="
-          grep -E '^CONFIG_VERSION_(CODE|NUMBER|DIST)=' .config || true
+          # Ensure the Aurora package itself is selected.
+          sed -i \
+            -e '/^CONFIG_PACKAGE_luci-theme-aurora=/d' \
+            -e '/^# CONFIG_PACKAGE_luci-theme-aurora is not set$/d' \
+            .config
 
-          make defconfig -j"$(nproc)"
+          printf '%s\n' \
+            'CONFIG_PACKAGE_luci-theme-aurora=y' \
+            >> .config
 
-          echo "==== Firmware version settings after defconfig ===="
-          grep -E '^CONFIG_VERSION_(CODE|NUMBER|DIST)=' .config || true
+          echo "==== Check invalid .config lines ===="
+
+          INVALID_CONFIG_LINES="$(
+            grep -nEv \
+              '^(CONFIG_[A-Za-z0-9_]+=.*|# CONFIG_[A-Za-z0-9_]+ is not set|#.*|[[:space:]]*)$' \
+              .config || true
+          )"
+
+          if [ -n "$INVALID_CONFIG_LINES" ]; then
+            echo "$INVALID_CONFIG_LINES"
+            echo "ERROR: invalid lines were found in .config"
+            exit 1
+          fi
+
+          echo "==== Ensure LuCI theme source ===="
+
+          AURORA_MAKEFILE="$(
+            find ./package \
+              -type f \
+              -path '*/luci-theme-aurora/Makefile' \
+              -print \
+              -quit
+          )"
+
+          if [ -z "$AURORA_MAKEFILE" ]; then
+            echo "ERROR: luci-theme-aurora/Makefile was not found."
+            find ./package \
+              -maxdepth 5 \
+              -iname '*aurora*' \
+              -print || true
+            exit 1
+          fi
+
+          echo "Aurora Makefile: $AURORA_MAKEFILE"
+
+          make defconfig
+
+          echo "==== Firmware version configuration ===="
+          grep -E \
+            '^CONFIG_VERSION_(CODE|NUMBER|DIST)=' \
+            .config || true
+
+          echo "==== Aurora configuration ===="
+          grep -E \
+            '^(CONFIG_PACKAGE_luci-theme-aurora|CONFIG_LUCI_THEME_)' \
+            .config || true
+
+          if ! grep -q \
+            '^CONFIG_PACKAGE_luci-theme-aurora=y$' \
+            .config; then
+            echo "ERROR: luci-theme-aurora was removed by make defconfig."
+            echo "The package source is incompatible or was not recognized."
+            exit 1
+          fi
+
+          echo "==== PassWall configuration ===="
+          grep -E \
+            '^CONFIG_PACKAGE_(luci-app-passwall|xray-core|sing-box)=' \
+            .config || true
 
           make clean -j"$(nproc)"
 
       - name: Download Packages
         if: env.WRT_TEST != 'true'
         run: |
+          set -e
           cd ./wrt/
 
-          make download -j$(nproc)
+          make download -j"$(nproc)"
+
+          find ./dl \
+            -type f \
+            -size -1024c \
+            -print \
+            -delete || true
+
+      - name: Compile Aurora Theme
+        if: env.WRT_TEST != 'true'
+        run: |
+          set -e
+          cd ./wrt/
+
+          echo "==== Compile luci-theme-aurora ===="
+
+          make package/luci-theme-aurora/compile -j1 V=s
+
+          echo "==== Aurora package output ===="
+
+          AURORA_APK="$(
+            find ./bin \
+              -type f \
+              -iname 'luci-theme-aurora*.apk' \
+              -print \
+              -quit
+          )"
+
+          if [ -z "$AURORA_APK" ]; then
+            echo "ERROR: luci-theme-aurora APK was not generated."
+
+            find ./bin \
+              -type f \
+              \( \
+                -iname '*aurora*' \
+                -o -iname '*theme*.apk' \
+              \) \
+              -print || true
+
+            exit 1
+          fi
+
+          echo "Generated package: $AURORA_APK"
 
       - name: Compile Firmware
         if: env.WRT_TEST != 'true'
         run: |
           cd ./wrt/
 
-          make -j$(nproc) || make -j1 V=s
+          make -j"$(nproc)" || make -j1 V=s
 
       - name: Machine Information
         run: |
+          set -e
           cd ./wrt/
 
           echo "======================="
-          lscpu | grep -E "name|Core|Thread"
+          lscpu | grep -E "Model name|Core|Thread" || true
           echo "======================="
           df -h
           echo "======================="
@@ -209,32 +462,75 @@ jobs:
 
       - name: Package Firmware
         run: |
-          cd ./wrt/ && mkdir ./upload/
+          set -e
+          cd ./wrt/
 
-          cp -f ./.config ./upload/Config-"$WRT_CONFIG"-"$WRT_INFO"-"$WRT_BRANCH"-"$WRT_DATE".txt
+          mkdir -p ./upload/
 
-          if [[ $WRT_TEST != 'true' ]]; then
-            echo "WRT_KVER=$(find ./bin/targets/ -type f -name "*.manifest" -exec grep -oP '^kernel - \K[\d\.]+' {} \;)" >> $GITHUB_ENV
-            echo "WRT_LIST=$(find ./bin/targets/ -type f -name "*.manifest" -exec grep -oP '^luci-(app|theme)[^ ]*' {} \; | tr '\n' ' ')" >> $GITHUB_ENV
+          cp -f \
+            ./.config \
+            "./upload/Config-$WRT_CONFIG-$WRT_INFO-$WRT_BRANCH-$WRT_DATE.txt"
 
-            find ./bin/targets/ -iregex ".*\(buildinfo\|json\|sha256sums\|packages\)$" -exec rm -rf {} +
+          if [[ "$WRT_TEST" != "true" ]]; then
+            WRT_KVER_VALUE="$(
+              find ./bin/targets/ \
+                -type f \
+                -name "*.manifest" \
+                -exec grep -h -oP '^kernel - \K[\d.]+' {} \; |
+                head -n 1
+            )"
 
-            for FILE in $(find ./bin/targets/ -type f -iname "*$WRT_TARGET*") ; do
-              EXT=$(basename $FILE | cut -d '.' -f 2-)
-              NAME=$(basename $FILE | cut -d '.' -f 1 | grep -io "\($WRT_TARGET\).*")
-              NEW_FILE="$WRT_INFO"-"$WRT_BRANCH"-"$NAME"-"$WRT_DATE"."$EXT"
-              mv -f $FILE ./upload/$NEW_FILE
-            done
+            WRT_LIST_VALUE="$(
+              find ./bin/targets/ \
+                -type f \
+                -name "*.manifest" \
+                -exec grep -h -oP '^luci-(app|theme)[^ ]*' {} \; |
+                sort -u |
+                tr '\n' ' '
+            )"
 
-            find ./bin/targets/ -type f -exec mv -f {} ./upload/ \;
+            {
+              echo "WRT_KVER=${WRT_KVER_VALUE:-none}"
+              echo "WRT_LIST=${WRT_LIST_VALUE:-none}"
+            } >> "$GITHUB_ENV"
 
-            make clean -j$(nproc)
+            find ./bin/targets/ \
+              -type f \
+              -iregex '.*\(buildinfo\|json\|sha256sums\|packages\)$' \
+              -delete
+
+            while IFS= read -r FILE; do
+              [ -z "$FILE" ] && continue
+
+              FILE_BASE="$(basename "$FILE")"
+              EXT="${FILE_BASE#*.}"
+              NAME="$(
+                printf '%s\n' "${FILE_BASE%%.*}" |
+                  grep -io "\($WRT_TARGET\).*" || true
+              )"
+
+              [ -z "$NAME" ] && NAME="${FILE_BASE%%.*}"
+
+              NEW_FILE="$WRT_INFO-$WRT_BRANCH-$NAME-$WRT_DATE.$EXT"
+
+              mv -f "$FILE" "./upload/$NEW_FILE"
+            done < <(
+              find ./bin/targets/ \
+                -type f \
+                -iname "*$WRT_TARGET*"
+            )
+
+            find ./bin/targets/ \
+              -type f \
+              -exec mv -f {} ./upload/ \;
+
+            make clean -j"$(nproc)"
           fi
 
       - name: Release Firmware
         uses: softprops/action-gh-release@master
         with:
-          tag_name: 精简版${{env.WRT_CONFIG}}-${{env.WRT_INFO}}-${{env.WRT_BRANCH}}-${{env.WRT_DATE}}
+          tag_name: 精简版${{ env.WRT_CONFIG }}-${{ env.WRT_INFO }}-${{ env.WRT_BRANCH }}-${{ env.WRT_DATE }}
           files: ./wrt/upload/*.*
           body: |
             这是个ZN-M2无WiFi无usb的固件包！
@@ -243,18 +539,18 @@ jobs:
 
             全系带开源硬件加速，别问了！
 
-            源码：${{env.WRT_REPO}}
-            分支：${{env.WRT_BRANCH}}
-            提交：${{env.WRT_HASH}}
+            源码：${{ env.WRT_REPO }}
+            分支：${{ env.WRT_BRANCH }}
+            提交：${{ env.WRT_HASH }}
 
-            配置：${{env.WRT_CONFIG}}
-            平台：${{env.WRT_TARGET}}
+            配置：${{ env.WRT_CONFIG }}
+            平台：${{ env.WRT_TARGET }}
 
-            登录地址：${{env.WRT_IP}}
-            登录密码：password或者  ${{env.WRT_PW}}
+            登录地址：${{ env.WRT_IP }}
+            登录密码：password或者 ${{ env.WRT_PW }}
 
-            WIFI名称：${{env.WRT_SSID}}  （无WiFi版本没有）
-            WIFI密码：${{env.WRT_WORD}}  （无WiFi版本没有）
+            WIFI名称：${{ env.WRT_SSID }}（无WiFi版本没有）
+            WIFI密码：${{ env.WRT_WORD }}（无WiFi版本没有）
 
-            内核版本：${{env.WRT_KVER}}
-            插件列表：${{env.WRT_LIST}}
+            内核版本：${{ env.WRT_KVER }}
+            插件列表：${{ env.WRT_LIST }}
