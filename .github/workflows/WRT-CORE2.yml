@@ -160,17 +160,29 @@ jobs:
 
       - name: Custom Settings
         run: |
+          set -e
           cd ./wrt/
 
           if [[ "${WRT_CONFIG,,}" == *"test"* ]]; then
-            cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt >> .config
+            cat "$GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt" >> .config
           else
-            cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt $GITHUB_WORKSPACE/Config/GENERAL2.txt >> .config
+            cat \
+              "$GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt" \
+              "$GITHUB_WORKSPACE/Config/GENERAL2.txt" \
+              >> .config
           fi
 
-          $GITHUB_WORKSPACE/Scripts/Settings.sh
+          "$GITHUB_WORKSPACE/Scripts/Settings.sh"
 
-          make defconfig -j$(nproc) && make clean -j$(nproc)
+          # Remove builder name and build time from LuCI firmware version.
+          ./scripts/config --set-str VERSION_CODE ""
+
+          make defconfig -j"$(nproc)"
+
+          echo "==== Firmware version settings ===="
+          grep -E '^CONFIG_VERSION_(CODE|NUMBER|DIST)' .config || true
+
+          make clean -j"$(nproc)"
 
       - name: Download Packages
         if: env.WRT_TEST != 'true'
