@@ -2,15 +2,15 @@
 
 set -Eeuo pipefail
 
-# Install or update an OpenWrt package repository.
+# Install or update packages from an OpenWrt package repository.
 #
 # Arguments:
 #   $1: Primary package name
 #   $2: GitHub repository, for example owner/repository
 #   $3: Repository branch
-#   $4: Mode:
-#       root - repository root is the package
-#       pkg  - extract matching package directories from the repository
+#   $4: Repository mode:
+#       root - repository root is an OpenWrt package
+#       pkg  - extract package directories from a multi-package repository
 #   $5: Additional package names separated by spaces
 UPDATE_PACKAGE() {
 	local PKG_NAME="${1:?Missing package name}"
@@ -32,7 +32,7 @@ UPDATE_PACKAGE() {
 	echo
 	echo "========== Updating ${PKG_NAME} =========="
 
-	# Remove old package directories from feeds and the local package tree.
+	# Remove old or conflicting package directories.
 	for NAME in "${PKG_LIST[@]}"; do
 		[[ -z "$NAME" ]] && continue
 
@@ -40,9 +40,12 @@ UPDATE_PACKAGE() {
 
 		local FOUND_DIRS
 		FOUND_DIRS="$(
-			find ../feeds/luci ../feeds/packages . \
+			find \
+				../feeds/luci \
+				../feeds/packages \
+				. \
 				-mindepth 1 \
-				-maxdepth 5 \
+				-maxdepth 6 \
 				-type d \
 				-name "$NAME" \
 				-not -path './.source-*' \
@@ -62,7 +65,7 @@ UPDATE_PACKAGE() {
 		fi
 	done
 
-	# Remove leftovers from previous runs.
+	# Remove leftovers from previous workflow runs.
 	rm -rf -- "$CLONE_DIR"
 	rm -rf -- "./${REPO_NAME}"
 
@@ -75,14 +78,14 @@ UPDATE_PACKAGE() {
 
 	case "$PKG_MODE" in
 		root)
-			# The repository root itself must be a valid OpenWrt package.
+			# The repository root itself must be an OpenWrt package.
 			if [[ ! -f "${CLONE_DIR}/Makefile" ]]; then
 				echo "ERROR: repository root has no Makefile: ${PKG_REPO}"
 				echo "Available Makefiles:"
 
 				find "$CLONE_DIR" \
 					-mindepth 2 \
-					-maxdepth 6 \
+					-maxdepth 7 \
 					-type f \
 					-name Makefile \
 					-print || true
@@ -93,6 +96,7 @@ UPDATE_PACKAGE() {
 
 			rm -rf -- "./${PKG_NAME}"
 			mv -- "$CLONE_DIR" "./${PKG_NAME}"
+			rm -rf -- "./${PKG_NAME}/.git"
 
 			echo "Installed root package: ./${PKG_NAME}"
 			;;
@@ -104,26 +108,7 @@ UPDATE_PACKAGE() {
 			local TARGET_DIR
 			local -A COPIED_DIRS=()
 
-			# Support repositories whose root is one of the requested packages.
-			if [[ -f "${CLONE_DIR}/Makefile" ]]; then
-				for NAME in "${PKG_LIST[@]}"; do
-					if [[ "$REPO_NAME" == "$NAME" || "$PKG_NAME" == "$NAME" ]]; then
-						TARGET_DIR="./${NAME}"
-
-						rm -rf -- "$TARGET_DIR"
-						cp -a -- "$CLONE_DIR" "$TARGET_DIR"
-						rm -rf -- "${TARGET_DIR}/.git"
-
-						COPIED_DIRS["$CLONE_DIR"]=1
-						COPIED_COUNT=$((COPIED_COUNT + 1))
-
-						echo "Copied root package: ${CLONE_DIR} -> ${TARGET_DIR}"
-						break
-					fi
-				done
-			fi
-
-			# Extract matching package directories that contain a Makefile.
+			# Extract each requested package directory containing a Makefile.
 			for NAME in "${PKG_LIST[@]}"; do
 				while IFS= read -r -d '' DIR; do
 					[[ -f "${DIR}/Makefile" ]] || continue
@@ -145,7 +130,7 @@ UPDATE_PACKAGE() {
 				done < <(
 					find "$CLONE_DIR" \
 						-mindepth 1 \
-						-maxdepth 6 \
+						-maxdepth 7 \
 						-type d \
 						-name "$NAME" \
 						-print0
@@ -158,7 +143,7 @@ UPDATE_PACKAGE() {
 				echo "Available package Makefiles:"
 
 				find "$CLONE_DIR" \
-					-maxdepth 7 \
+					-maxdepth 8 \
 					-type f \
 					-name Makefile \
 					-print || true
@@ -166,6 +151,24 @@ UPDATE_PACKAGE() {
 				rm -rf -- "$CLONE_DIR"
 				exit 1
 			fi
+
+			# Confirm that every requested package was extracted.
+			for NAME in "${PKG_LIST[@]}"; do
+				if [[ ! -f "./${NAME}/Makefile" ]]; then
+					echo "ERROR: requested package was not extracted: ${NAME}"
+					echo "Repository: ${PKG_REPO}"
+					echo "Available Makefiles:"
+
+					find "$CLONE_DIR" \
+						-maxdepth 8 \
+						-type f \
+						-name Makefile \
+						-print || true
+
+					rm -rf -- "$CLONE_DIR"
+					exit 1
+				fi
+			done
 
 			rm -rf -- "$CLONE_DIR"
 			;;
@@ -178,23 +181,13 @@ UPDATE_PACKAGE() {
 	esac
 }
 
-# Verify that an OpenWrt package exists and has a Makefile.
+# Verify that an extracted package exists and has a Makefile.
 VERIFY_PACKAGE() {
 	local PKG_NAME="${1:?Missing package name}"
-	local MAKEFILE=""
+	local MAKEFILE="./${PKG_NAME}/Makefile"
 
-	MAKEFILE="$(
-		find . \
-			-mindepth 2 \
-			-maxdepth 7 \
-			-type f \
-			-path "*/${PKG_NAME}/Makefile" \
-			-print \
-			-quit
-	)"
-
-	if [[ -z "$MAKEFILE" ]]; then
-		echo "ERROR: package Makefile was not found: ${PKG_NAME}"
+	if [[ ! -f "$MAKEFILE" ]]; then
+		echo "ERROR: package Makefile was not found: ${MAKEFILE}"
 		return 1
 	fi
 
@@ -205,7 +198,8 @@ VERIFY_PACKAGE() {
 # Third-party packages
 # --------------------------------------------------------------------
 
-# Aurora theme: the repository root is the package.
+# Aurora theme.
+# Its repository root is the OpenWrt package.
 UPDATE_PACKAGE \
 	"luci-theme-aurora" \
 	"eamonxg/luci-theme-aurora" \
@@ -213,13 +207,14 @@ UPDATE_PACKAGE \
 	"root"
 
 # PassWall LuCI application.
+# The selected proxy cores and dependencies are resolved through feeds/config.
 UPDATE_PACKAGE \
 	"luci-app-passwall" \
 	"Openwrt-Passwall/openwrt-passwall" \
 	"main" \
 	"pkg"
 
-# Lucky repository contains both LuCI and executable packages.
+# Lucky LuCI application and Lucky executable.
 UPDATE_PACKAGE \
 	"luci-app-lucky" \
 	"gdy666/luci-app-lucky" \
@@ -227,7 +222,7 @@ UPDATE_PACKAGE \
 	"pkg" \
 	"lucky"
 
-# MosDNS repository contains both LuCI and executable packages.
+# MosDNS LuCI application and MosDNS executable.
 UPDATE_PACKAGE \
 	"luci-app-mosdns" \
 	"sbwml/luci-app-mosdns" \
@@ -235,15 +230,17 @@ UPDATE_PACKAGE \
 	"pkg" \
 	"mosdns"
 
-# Gecoosac: the repository root is the package.
+# Gecoosac LuCI application and Gecoosac executable.
+# This is a multi-package repository; its root has no Makefile.
 UPDATE_PACKAGE \
 	"luci-app-gecoosac" \
 	"laipeng668/luci-app-gecoosac" \
 	"main" \
-	"root"
+	"pkg" \
+	"gecoosac"
 
 # microsocks is provided by the official OpenWrt/ImmortalWrt feeds.
-# No third-party repository is required.
+# No third-party repository needs to be cloned.
 
 echo
 echo "========== Package source update completed =========="
@@ -258,6 +255,7 @@ VERIFY_PACKAGE "lucky"
 VERIFY_PACKAGE "luci-app-mosdns"
 VERIFY_PACKAGE "mosdns"
 VERIFY_PACKAGE "luci-app-gecoosac"
+VERIFY_PACKAGE "gecoosac"
 
 echo
 echo "========== All required packages are ready =========="
