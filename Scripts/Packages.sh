@@ -2,13 +2,24 @@
 
 set -Eeuo pipefail
 
+# Install or update an OpenWrt package repository.
+#
+# Arguments:
+#   $1: Primary package name
+#   $2: GitHub repository, for example owner/repository
+#   $3: Repository branch
+#   $4: Mode:
+#       root - repository root is the package
+#       pkg  - extract matching package directories from the repository
+#   $5: Additional package names separated by spaces
 UPDATE_PACKAGE() {
 	local PKG_NAME="${1:?Missing package name}"
 	local PKG_REPO="${2:?Missing GitHub repository}"
 	local PKG_BRANCH="${3:?Missing repository branch}"
-	local PKG_SPECIAL="${4:-}"
+	local PKG_MODE="${4:-root}"
 	local EXTRA_NAMES="${5:-}"
 	local REPO_NAME="${PKG_REPO##*/}"
+	local CLONE_DIR="./.source-${REPO_NAME}"
 
 	local -a PKG_LIST=("$PKG_NAME")
 	local -a EXTRA_NAME_LIST=()
@@ -21,6 +32,7 @@ UPDATE_PACKAGE() {
 	echo
 	echo "========== Updating ${PKG_NAME} =========="
 
+	# Remove old package directories from feeds and the local package tree.
 	for NAME in "${PKG_LIST[@]}"; do
 		[[ -z "$NAME" ]] && continue
 
@@ -29,10 +41,11 @@ UPDATE_PACKAGE() {
 		local FOUND_DIRS
 		FOUND_DIRS="$(
 			find ../feeds/luci ../feeds/packages . \
-				-maxdepth 4 \
+				-mindepth 1 \
+				-maxdepth 5 \
 				-type d \
-				-iname "*${NAME}*" \
-				-not -path './.*' \
+				-name "$NAME" \
+				-not -path './.source-*' \
 				-print \
 				2>/dev/null || true
 		)"
@@ -49,6 +62,8 @@ UPDATE_PACKAGE() {
 		fi
 	done
 
+	# Remove leftovers from previous runs.
+	rm -rf -- "$CLONE_DIR"
 	rm -rf -- "./${REPO_NAME}"
 
 	git clone \
@@ -56,15 +71,59 @@ UPDATE_PACKAGE() {
 		--single-branch \
 		--branch "$PKG_BRANCH" \
 		"https://github.com/${PKG_REPO}.git" \
-		"./${REPO_NAME}"
+		"$CLONE_DIR"
 
-	case "$PKG_SPECIAL" in
+	case "$PKG_MODE" in
+		root)
+			# The repository root itself must be a valid OpenWrt package.
+			if [[ ! -f "${CLONE_DIR}/Makefile" ]]; then
+				echo "ERROR: repository root has no Makefile: ${PKG_REPO}"
+				echo "Available Makefiles:"
+
+				find "$CLONE_DIR" \
+					-mindepth 2 \
+					-maxdepth 6 \
+					-type f \
+					-name Makefile \
+					-print || true
+
+				rm -rf -- "$CLONE_DIR"
+				exit 1
+			fi
+
+			rm -rf -- "./${PKG_NAME}"
+			mv -- "$CLONE_DIR" "./${PKG_NAME}"
+
+			echo "Installed root package: ./${PKG_NAME}"
+			;;
+
 		pkg)
 			local COPIED_COUNT=0
+			local NAME
 			local DIR
-			local TARGET_NAME
+			local TARGET_DIR
 			local -A COPIED_DIRS=()
 
+			# Support repositories whose root is one of the requested packages.
+			if [[ -f "${CLONE_DIR}/Makefile" ]]; then
+				for NAME in "${PKG_LIST[@]}"; do
+					if [[ "$REPO_NAME" == "$NAME" || "$PKG_NAME" == "$NAME" ]]; then
+						TARGET_DIR="./${NAME}"
+
+						rm -rf -- "$TARGET_DIR"
+						cp -a -- "$CLONE_DIR" "$TARGET_DIR"
+						rm -rf -- "${TARGET_DIR}/.git"
+
+						COPIED_DIRS["$CLONE_DIR"]=1
+						COPIED_COUNT=$((COPIED_COUNT + 1))
+
+						echo "Copied root package: ${CLONE_DIR} -> ${TARGET_DIR}"
+						break
+					fi
+				done
+			fi
+
+			# Extract matching package directories that contain a Makefile.
 			for NAME in "${PKG_LIST[@]}"; do
 				while IFS= read -r -d '' DIR; do
 					[[ -f "${DIR}/Makefile" ]] || continue
@@ -73,95 +132,118 @@ UPDATE_PACKAGE() {
 						continue
 					fi
 
-					TARGET_NAME="$(basename "$DIR")"
+					TARGET_DIR="./$(basename "$DIR")"
 
-					rm -rf -- "./${TARGET_NAME}"
-					cp -a -- "$DIR" "./${TARGET_NAME}"
+					rm -rf -- "$TARGET_DIR"
+					cp -a -- "$DIR" "$TARGET_DIR"
+					rm -rf -- "${TARGET_DIR}/.git"
 
 					COPIED_DIRS["$DIR"]=1
 					COPIED_COUNT=$((COPIED_COUNT + 1))
 
-					echo "Copied package: ${DIR} -> ./${TARGET_NAME}"
+					echo "Copied package: ${DIR} -> ${TARGET_DIR}"
 				done < <(
-					find "./${REPO_NAME}" \
+					find "$CLONE_DIR" \
 						-mindepth 1 \
-						-maxdepth 5 \
+						-maxdepth 6 \
 						-type d \
-						-iname "$NAME" \
+						-name "$NAME" \
 						-print0
 				)
 			done
 
 			if (( COPIED_COUNT == 0 )); then
-				echo "ERROR: no matching package directory found in ${PKG_REPO}"
-				find "./${REPO_NAME}" \
-					-maxdepth 5 \
+				echo "ERROR: no requested package was found in ${PKG_REPO}"
+				echo "Requested package names: ${PKG_LIST[*]}"
+				echo "Available package Makefiles:"
+
+				find "$CLONE_DIR" \
+					-maxdepth 7 \
 					-type f \
 					-name Makefile \
 					-print || true
+
+				rm -rf -- "$CLONE_DIR"
 				exit 1
 			fi
 
-			rm -rf -- "./${REPO_NAME}"
-			;;
-
-		name)
-			if [[ "./${REPO_NAME}" != "./${PKG_NAME}" ]]; then
-				rm -rf -- "./${PKG_NAME}"
-				mv -- "./${REPO_NAME}" "./${PKG_NAME}"
-			fi
-			;;
-
-		"")
+			rm -rf -- "$CLONE_DIR"
 			;;
 
 		*)
-			echo "ERROR: unsupported package mode: ${PKG_SPECIAL}"
+			echo "ERROR: unsupported package mode: ${PKG_MODE}"
+			rm -rf -- "$CLONE_DIR"
 			exit 1
 			;;
 	esac
 }
 
-# Aurora theme
+# Verify that an OpenWrt package exists and has a Makefile.
+VERIFY_PACKAGE() {
+	local PKG_NAME="${1:?Missing package name}"
+	local MAKEFILE=""
+
+	MAKEFILE="$(
+		find . \
+			-mindepth 2 \
+			-maxdepth 7 \
+			-type f \
+			-path "*/${PKG_NAME}/Makefile" \
+			-print \
+			-quit
+	)"
+
+	if [[ -z "$MAKEFILE" ]]; then
+		echo "ERROR: package Makefile was not found: ${PKG_NAME}"
+		return 1
+	fi
+
+	echo "Found ${PKG_NAME}: ${MAKEFILE}"
+}
+
+# --------------------------------------------------------------------
+# Third-party packages
+# --------------------------------------------------------------------
+
+# Aurora theme: the repository root is the package.
 UPDATE_PACKAGE \
 	"luci-theme-aurora" \
 	"eamonxg/luci-theme-aurora" \
 	"master" \
-	"name"
+	"root"
 
-# PassWall LuCI application and related packages
+# PassWall LuCI application.
 UPDATE_PACKAGE \
 	"luci-app-passwall" \
 	"Openwrt-Passwall/openwrt-passwall" \
 	"main" \
-	"pkg" \
-	"passwall"
+	"pkg"
 
-# Lucky LuCI application
+# Lucky repository contains both LuCI and executable packages.
 UPDATE_PACKAGE \
 	"luci-app-lucky" \
 	"gdy666/luci-app-lucky" \
 	"main" \
-	"" \
+	"pkg" \
 	"lucky"
 
-# MosDNS
+# MosDNS repository contains both LuCI and executable packages.
 UPDATE_PACKAGE \
 	"luci-app-mosdns" \
 	"sbwml/luci-app-mosdns" \
 	"v5" \
-	"name" \
+	"pkg" \
 	"mosdns"
 
-# Gecoosac
+# Gecoosac: the repository root is the package.
 UPDATE_PACKAGE \
 	"luci-app-gecoosac" \
 	"laipeng668/luci-app-gecoosac" \
 	"main" \
-	"name" \
-	"gecoosac"
+	"root"
 
-# microsocks is provided by the official packages feed.
+# microsocks is provided by the official OpenWrt/ImmortalWrt feeds.
+# No third-party repository is required.
 
 echo
 echo "========== Package source update completed =========="
@@ -169,19 +251,13 @@ echo "========== Package source update completed =========="
 echo
 echo "========== Verify package Makefiles =========="
 
-REQUIRED_MAKEFILES=(
-	"./luci-theme-aurora/Makefile"
-	"./luci-app-passwall/Makefile"
-	"./luci-app-lucky/Makefile"
-	"./luci-app-mosdns/Makefile"
-	"./luci-app-gecoosac/Makefile"
-)
+VERIFY_PACKAGE "luci-theme-aurora"
+VERIFY_PACKAGE "luci-app-passwall"
+VERIFY_PACKAGE "luci-app-lucky"
+VERIFY_PACKAGE "lucky"
+VERIFY_PACKAGE "luci-app-mosdns"
+VERIFY_PACKAGE "mosdns"
+VERIFY_PACKAGE "luci-app-gecoosac"
 
-for MAKEFILE in "${REQUIRED_MAKEFILES[@]}"; do
-	if [[ ! -f "$MAKEFILE" ]]; then
-		echo "ERROR: required package Makefile does not exist: ${MAKEFILE}"
-		exit 1
-	fi
-
-	echo "Found: ${MAKEFILE}"
-done
+echo
+echo "========== All required packages are ready =========="
