@@ -65,22 +65,22 @@ jobs:
 
     steps:
       - name: Checkout Projects
-        uses: actions/checkout@main
+        uses: actions/checkout@v4
 
       - name: Initialization Environment
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          set -e
+          set -Eeuo pipefail
 
-          sudo -E apt -yqq purge firefox || true
-          sudo -E apt -yqq update
-          sudo -E apt -yqq full-upgrade
-          sudo -E apt -yqq autoremove --purge
-          sudo -E apt -yqq autoclean
-          sudo -E apt -yqq clean
+          sudo -E apt-get -yqq purge firefox || true
+          sudo -E apt-get -yqq update
+          sudo -E apt-get -yqq full-upgrade
+          sudo -E apt-get -yqq autoremove --purge
+          sudo -E apt-get -yqq autoclean
+          sudo -E apt-get -yqq clean
 
-          sudo -E apt -yqq install \
+          sudo -E apt-get -yqq install \
             dos2unix \
             python3-netifaces \
             libfuse-dev
@@ -88,9 +88,10 @@ jobs:
           sudo bash -c \
             'bash <(curl -fsSL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
 
-          sudo -E systemctl daemon-reload
-          sudo -E timedatectl set-timezone "Asia/Shanghai"
+          sudo systemctl daemon-reload
+          sudo timedatectl set-timezone "Asia/Shanghai"
 
+          sudo rm -rf /mnt/build_wrt
           sudo mkdir -p /mnt/build_wrt
           sudo chown "$USER:$USER" /mnt/build_wrt
 
@@ -99,12 +100,13 @@ jobs:
 
       - name: Initialization Values
         run: |
-          set -e
+          set -Eeuo pipefail
 
           CONFIG_FILE="$GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt"
 
           if [ ! -f "$CONFIG_FILE" ]; then
-            echo "ERROR: configuration file does not exist: $CONFIG_FILE"
+            echo "ERROR: configuration file does not exist:"
+            echo "$CONFIG_FILE"
             exit 1
           fi
 
@@ -115,7 +117,8 @@ jobs:
           )"
 
           if [ -z "$WRT_TARGET_VALUE" ]; then
-            echo "ERROR: unable to detect target from $CONFIG_FILE"
+            echo "ERROR: unable to detect target from:"
+            echo "$CONFIG_FILE"
             exit 1
           fi
 
@@ -130,7 +133,7 @@ jobs:
 
       - name: Clone Code
         run: |
-          set -e
+          set -Eeuo pipefail
 
           git clone \
             --depth=1 \
@@ -141,8 +144,8 @@ jobs:
 
           cd ./wrt/
 
-          echo "WRT_HASH=$(git log -1 --pretty=format:'%h')" \
-            >> "$GITHUB_ENV"
+          WRT_HASH_VALUE="$(git log -1 --pretty=format:'%h')"
+          echo "WRT_HASH=$WRT_HASH_VALUE" >> "$GITHUB_ENV"
 
           PROJECT_MIRRORS_FILE="./scripts/projectsmirrors.json"
 
@@ -156,7 +159,7 @@ jobs:
 
       - name: Check Scripts
         run: |
-          set -e
+          set -Eeuo pipefail
 
           find "$GITHUB_WORKSPACE" \
             -maxdepth 3 \
@@ -165,61 +168,39 @@ jobs:
             -exec dos2unix {} \; \
             -exec chmod +x {} \;
 
-      - name: Check Caches
-        id: check-cache
+      - name: Cache Downloads And Ccache
         if: env.WRT_TEST != 'true'
-        uses: actions/cache@main
+        uses: actions/cache@v4
         with:
-          key: ${{ env.WRT_CONFIG }}-${{ env.WRT_INFO }}-${{ env.WRT_HASH }}
+          key: wrt-v3-${{ env.WRT_CONFIG }}-${{ env.WRT_INFO }}-${{ env.WRT_HASH }}
           restore-keys: |
-            ${{ env.WRT_CONFIG }}-${{ env.WRT_INFO }}
+            wrt-v3-${{ env.WRT_CONFIG }}-${{ env.WRT_INFO }}-
+            wrt-v3-${{ env.WRT_CONFIG }}-
           path: |
             ./wrt/.ccache
-            ./wrt/staging_dir/host*
-            ./wrt/staging_dir/tool*
+            ./wrt/dl
 
-      - name: Update Caches
-        if: env.WRT_TEST != 'true'
+      - name: Clean Host Build State
         run: |
-          set -e
+          set -Eeuo pipefail
+          cd ./wrt/
 
-          if [ -d "./wrt/staging_dir" ]; then
-            find "./wrt/staging_dir" \
-              -type d \
-              -name "stamp" \
-              -not -path "*target*" |
-            while IFS= read -r DIR; do
-              find "$DIR" -type f -exec touch {} +
-            done
+          echo "==== Clean stale host build state ===="
 
-            mkdir -p ./wrt/tmp
-            printf '%s\n' "1" > ./wrt/tmp/.build
+          rm -rf \
+            ./staging_dir/host \
+            ./staging_dir/hostpkg \
+            ./build_dir/host \
+            ./build_dir/hostpkg \
+            ./tmp
 
-            echo "Toolchain cache restored."
-          else
-            echo "Toolchain cache not found."
-          fi
+          mkdir -p ./tmp
 
-          if [ "${{ steps.check-cache.outputs.cache-hit }}" != "true" ]; then
-            CACHE_LIST="$(
-              gh cache list \
-                --key "$WRT_CONFIG-$WRT_INFO" \
-                --limit 100 \
-                --json key \
-                --jq '.[].key' || true
-            )"
-
-            while IFS= read -r CACHE_KEY; do
-              [ -z "$CACHE_KEY" ] && continue
-              gh cache delete "$CACHE_KEY" || true
-            done <<< "$CACHE_LIST"
-
-            echo "Old caches cleaned."
-          fi
+          echo "Host build state cleaned."
 
       - name: Update Feeds
         run: |
-          set -e
+          set -Eeuo pipefail
           cd ./wrt/
 
           ./scripts/feeds update -a
@@ -227,7 +208,7 @@ jobs:
 
       - name: Custom Packages
         run: |
-          set -e
+          set -Eeuo pipefail
           cd ./wrt/package/
 
           "$GITHUB_WORKSPACE/Scripts/Packages.sh"
@@ -236,7 +217,7 @@ jobs:
           echo "==== Third-party package Makefiles ===="
 
           find . \
-            -maxdepth 5 \
+            -maxdepth 6 \
             -type f \
             -name Makefile \
             \( \
@@ -253,7 +234,7 @@ jobs:
 
       - name: Custom Settings
         run: |
-          set -e
+          set -Eeuo pipefail
           cd ./wrt/
 
           CONFIG_FILE="$GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt"
@@ -265,7 +246,8 @@ jobs:
             cat "$CONFIG_FILE" > .config
           else
             if [ ! -f "$GENERAL_FILE" ]; then
-              echo "ERROR: general configuration does not exist: $GENERAL_FILE"
+              echo "ERROR: general configuration does not exist:"
+              echo "$GENERAL_FILE"
               exit 1
             fi
 
@@ -301,11 +283,11 @@ jobs:
 
               if ! printf '%s' "$PACKAGE" |
                 grep -Eq '^[A-Za-z0-9][A-Za-z0-9._+@-]*$'; then
-                echo "ERROR: invalid package name: $PACKAGE"
+                echo "ERROR: invalid package name:"
+                echo "$PACKAGE"
                 exit 1
               fi
 
-              # Remove a raw package-name line if Settings.sh wrote one.
               awk -v package="$PACKAGE" '
                 $0 != package {
                   print
@@ -314,7 +296,6 @@ jobs:
 
               mv .config.tmp .config
 
-              # Remove duplicate enabled/disabled entries for this package.
               awk -v symbol="CONFIG_PACKAGE_${PACKAGE}" '
                 index($0, symbol "=") == 1 {
                   next
@@ -380,13 +361,6 @@ jobs:
 
           echo "==== Check invalid .config lines ===="
 
-          # Legal lines include:
-          #   CONFIG_PACKAGE_luci-app-passwall=y
-          #   CONFIG_PACKAGE_kmod-ath11k=n
-          #   CONFIG_VERSION_CODE=""
-          #   # CONFIG_PACKAGE_xxx is not set
-          #
-          # OpenWrt symbols can contain hyphens, dots, plus signs and @.
           if ! awk '
             /^[[:space:]]*$/ {
               next
@@ -432,7 +406,7 @@ jobs:
             echo "ERROR: luci-theme-aurora/Makefile was not found."
 
             find ./package \
-              -maxdepth 6 \
+              -maxdepth 7 \
               -iname '*aurora*' \
               -print || true
 
@@ -474,7 +448,7 @@ jobs:
       - name: Download Packages
         if: env.WRT_TEST != 'true'
         run: |
-          set -e
+          set -Eeuo pipefail
           cd ./wrt/
 
           make download -j"$(nproc)"
@@ -485,11 +459,63 @@ jobs:
             -print \
             -delete || true
 
+      - name: Prepare Host Build Tools
+        if: env.WRT_TEST != 'true'
+        run: |
+          set -Eeuo pipefail
+          cd ./wrt/
+
+          echo "==== Build host tools ===="
+
+          make tools/install -j"$(nproc)" || \
+            make tools/install -j1 V=s
+
+          echo "==== Check host sed ===="
+
+          if [ ! -x ./staging_dir/host/bin/sed ]; then
+            echo "Host sed is missing. Rebuilding host tools."
+
+            rm -rf \
+              ./staging_dir/host \
+              ./staging_dir/hostpkg \
+              ./build_dir/host \
+              ./build_dir/hostpkg \
+              ./tmp
+
+            mkdir -p ./tmp
+
+            make tools/install -j1 V=s
+          fi
+
+          if [ ! -x ./staging_dir/host/bin/sed ]; then
+            echo "ERROR: host sed was not generated."
+
+            find ./staging_dir \
+              -maxdepth 5 \
+              -type f \
+              -name sed \
+              -print 2>/dev/null || true
+
+            exit 1
+          fi
+
+          HOST_SED_PATH="$(readlink -f ./staging_dir/host/bin/sed)"
+
+          echo "Host sed: $HOST_SED_PATH"
+          ./staging_dir/host/bin/sed --version | head -n 1 || true
+
       - name: Compile Aurora Theme
         if: env.WRT_TEST != 'true'
         run: |
-          set -e
+          set -Eeuo pipefail
           cd ./wrt/
+
+          echo "==== Verify host sed before compiling Aurora ===="
+
+          if [ ! -x ./staging_dir/host/bin/sed ]; then
+            echo "ERROR: host sed is missing before Aurora compilation."
+            exit 1
+          fi
 
           echo "==== Compile luci-theme-aurora ===="
 
@@ -524,13 +550,15 @@ jobs:
       - name: Compile Firmware
         if: env.WRT_TEST != 'true'
         run: |
+          set -o pipefail
           cd ./wrt/
 
           make -j"$(nproc)" || make -j1 V=s
 
       - name: Machine Information
+        if: always()
         run: |
-          set -e
+          set -Eeuo pipefail
           cd ./wrt/
 
           echo "======================="
@@ -542,8 +570,9 @@ jobs:
           echo "======================="
 
       - name: Package Firmware
+        if: success()
         run: |
-          set -e
+          set -Eeuo pipefail
           cd ./wrt/
 
           mkdir -p ./upload/
@@ -558,7 +587,7 @@ jobs:
                 -type f \
                 -name "*.manifest" \
                 -exec grep -h -oP '^kernel - \K[\d.]+' {} \; |
-                head -n 1
+                head -n 1 || true
             )"
 
             WRT_LIST_VALUE="$(
@@ -567,7 +596,7 @@ jobs:
                 -name "*.manifest" \
                 -exec grep -h -oP '^luci-(app|theme)[^ ]*' {} \; |
                 sort -u |
-                tr '\n' ' '
+                tr '\n' ' ' || true
             )"
 
             {
@@ -577,22 +606,41 @@ jobs:
 
             find ./bin/targets/ \
               -type f \
-              -iregex '.*\(buildinfo\|json\|sha256sums\|packages\)$' \
+              \( \
+                -name "*.buildinfo" \
+                -o -name "*.json" \
+                -o -name "sha256sums" \
+                -o -name "*.packages" \
+              \) \
               -delete
 
             while IFS= read -r FILE; do
               [ -z "$FILE" ] && continue
 
               FILE_BASE="$(basename "$FILE")"
-              EXT="${FILE_BASE#*.}"
+
+              if [[ "$FILE_BASE" == *.* ]]; then
+                EXT="${FILE_BASE#*.}"
+                FILE_STEM="${FILE_BASE%%.*}"
+              else
+                EXT=""
+                FILE_STEM="$FILE_BASE"
+              fi
+
               NAME="$(
-                printf '%s\n' "${FILE_BASE%%.*}" |
+                printf '%s\n' "$FILE_STEM" |
                   grep -io "\($WRT_TARGET\).*" || true
               )"
 
-              [ -z "$NAME" ] && NAME="${FILE_BASE%%.*}"
+              if [ -z "$NAME" ]; then
+                NAME="$FILE_STEM"
+              fi
 
-              NEW_FILE="$WRT_INFO-$WRT_BRANCH-$NAME-$WRT_DATE.$EXT"
+              if [ -n "$EXT" ]; then
+                NEW_FILE="$WRT_INFO-$WRT_BRANCH-$NAME-$WRT_DATE.$EXT"
+              else
+                NEW_FILE="$WRT_INFO-$WRT_BRANCH-$NAME-$WRT_DATE"
+              fi
 
               mv -f "$FILE" "./upload/$NEW_FILE"
             done < <(
@@ -608,7 +656,15 @@ jobs:
             make clean -j"$(nproc)"
           fi
 
+          echo "==== Upload files ===="
+
+          find ./upload \
+            -maxdepth 1 \
+            -type f \
+            -printf '%f\n'
+
       - name: Release Firmware
+        if: success()
         uses: softprops/action-gh-release@master
         with:
           tag_name: 精简版${{ env.WRT_CONFIG }}-${{ env.WRT_INFO }}-${{ env.WRT_BRANCH }}-${{ env.WRT_DATE }}
