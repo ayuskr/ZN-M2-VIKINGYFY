@@ -151,13 +151,6 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Custom Packages
-        run: |
-          cd ./wrt/package/
-
-          $GITHUB_WORKSPACE/Scripts/Packages.sh
-          $GITHUB_WORKSPACE/Scripts/Handles.sh
-
       - name: Custom Settings
         run: |
           set -e
@@ -174,13 +167,17 @@ jobs:
 
           "$GITHUB_WORKSPACE/Scripts/Settings.sh"
 
-          # Remove builder name and build time from LuCI firmware version.
-          ./scripts/config --set-str VERSION_CODE ""
+          # 删除 Settings.sh 或配置文件写入的固件编译者标识
+          sed -i '/^CONFIG_VERSION_CODE=/d' .config
+          printf '%s\n' 'CONFIG_VERSION_CODE=""' >> .config
+
+          echo "==== Firmware version settings before defconfig ===="
+          grep -E '^CONFIG_VERSION_(CODE|NUMBER|DIST)=' .config || true
 
           make defconfig -j"$(nproc)"
 
-          echo "==== Firmware version settings ===="
-          grep -E '^CONFIG_VERSION_(CODE|NUMBER|DIST)' .config || true
+          echo "==== Firmware version settings after defconfig ===="
+          grep -E '^CONFIG_VERSION_(CODE|NUMBER|DIST)=' .config || true
 
           make clean -j"$(nproc)"
 
