@@ -2,18 +2,10 @@
 
 set -Eeuo pipefail
 
-# Clone and install an OpenWrt package repository.
-#
-# Arguments:
-#   $1 package matching name
-#   $2 GitHub repository
-#   $3 branch
-#   $4 special mode: pkg or name
-#   $5 additional matching names, separated by spaces
 UPDATE_PACKAGE() {
 	local PKG_NAME="${1:?Missing package name}"
-	local PKG_REPO="${2:?Missing repository}"
-	local PKG_BRANCH="${3:?Missing branch}"
+	local PKG_REPO="${2:?Missing GitHub repository}"
+	local PKG_BRANCH="${3:?Missing repository branch}"
 	local PKG_SPECIAL="${4:-}"
 	local EXTRA_NAMES="${5:-}"
 	local REPO_NAME="${PKG_REPO##*/}"
@@ -29,7 +21,6 @@ UPDATE_PACKAGE() {
 	echo
 	echo "========== Updating ${PKG_NAME} =========="
 
-	# Remove old packages from the official feeds.
 	for NAME in "${PKG_LIST[@]}"; do
 		[[ -z "$NAME" ]] && continue
 
@@ -37,10 +28,11 @@ UPDATE_PACKAGE() {
 
 		local FOUND_DIRS
 		FOUND_DIRS="$(
-			find ../feeds/luci ../feeds/packages \
-				-maxdepth 3 \
+			find ../feeds/luci ../feeds/packages . \
+				-maxdepth 4 \
 				-type d \
 				-iname "*${NAME}*" \
+				-not -path './.*' \
 				-print \
 				2>/dev/null || true
 		)"
@@ -57,10 +49,8 @@ UPDATE_PACKAGE() {
 		fi
 	done
 
-	# Remove a previous clone.
 	rm -rf -- "./${REPO_NAME}"
 
-	# Clone the repository.
 	git clone \
 		--depth=1 \
 		--single-branch \
@@ -71,27 +61,31 @@ UPDATE_PACKAGE() {
 	case "$PKG_SPECIAL" in
 		pkg)
 			local COPIED_COUNT=0
+			local DIR
+			local TARGET_NAME
 			local -A COPIED_DIRS=()
 
-			# Copy only matching package directories from a multi-package repository.
 			for NAME in "${PKG_LIST[@]}"; do
 				while IFS= read -r -d '' DIR; do
 					[[ -f "${DIR}/Makefile" ]] || continue
 
-					# Avoid copying the same directory twice.
 					if [[ -n "${COPIED_DIRS["$DIR"]+exists}" ]]; then
 						continue
 					fi
 
-					cp -a -- "$DIR" ./
+					TARGET_NAME="$(basename "$DIR")"
+
+					rm -rf -- "./${TARGET_NAME}"
+					cp -a -- "$DIR" "./${TARGET_NAME}"
+
 					COPIED_DIRS["$DIR"]=1
 					COPIED_COUNT=$((COPIED_COUNT + 1))
 
-					echo "Copied package: ${DIR}"
+					echo "Copied package: ${DIR} -> ./${TARGET_NAME}"
 				done < <(
 					find "./${REPO_NAME}" \
 						-mindepth 1 \
-						-maxdepth 4 \
+						-maxdepth 5 \
 						-type d \
 						-iname "$NAME" \
 						-print0
@@ -99,7 +93,12 @@ UPDATE_PACKAGE() {
 			done
 
 			if (( COPIED_COUNT == 0 )); then
-				echo "No package directory found in ${PKG_REPO}" >&2
+				echo "ERROR: no matching package directory found in ${PKG_REPO}"
+				find "./${REPO_NAME}" \
+					-maxdepth 5 \
+					-type f \
+					-name Makefile \
+					-print || true
 				exit 1
 			fi
 
@@ -107,39 +106,36 @@ UPDATE_PACKAGE() {
 			;;
 
 		name)
-			rm -rf -- "./${PKG_NAME}"
-			mv -- "./${REPO_NAME}" "./${PKG_NAME}"
+			if [[ "./${REPO_NAME}" != "./${PKG_NAME}" ]]; then
+				rm -rf -- "./${PKG_NAME}"
+				mv -- "./${REPO_NAME}" "./${PKG_NAME}"
+			fi
 			;;
 
 		"")
-			# Keep the cloned repository as a package feed.
 			;;
 
 		*)
-			echo "Unsupported package mode: ${PKG_SPECIAL}" >&2
+			echo "ERROR: unsupported package mode: ${PKG_SPECIAL}"
 			exit 1
 			;;
 	esac
 }
 
-# --------------------------------------------------------------------
-# Required packages only
-# --------------------------------------------------------------------
-
 # Aurora theme
 UPDATE_PACKAGE \
-	"aurora" \
+	"luci-theme-aurora" \
 	"eamonxg/luci-theme-aurora" \
-	"master"
+	"master" \
+	"name"
 
-# PassWall.
-# The repository may contain both "passwall" and "luci-app-passwall".
+# PassWall LuCI application and related packages
 UPDATE_PACKAGE \
-	"passwall" \
+	"luci-app-passwall" \
 	"Openwrt-Passwall/openwrt-passwall" \
 	"main" \
 	"pkg" \
-	"luci-app-passwall"
+	"passwall"
 
 # Lucky LuCI application
 UPDATE_PACKAGE \
@@ -151,18 +147,41 @@ UPDATE_PACKAGE \
 
 # MosDNS
 UPDATE_PACKAGE \
-	"mosdns" \
+	"luci-app-mosdns" \
 	"sbwml/luci-app-mosdns" \
-	"v5"
+	"v5" \
+	"name" \
+	"mosdns"
 
 # Gecoosac
 UPDATE_PACKAGE \
-	"gecoosac" \
+	"luci-app-gecoosac" \
 	"laipeng668/luci-app-gecoosac" \
-	"main"
+	"main" \
+	"name" \
+	"gecoosac"
 
-# microsocks is provided by the upstream OpenWrt/ImmortalWrt feeds.
-# It does not need to be cloned here.
+# microsocks is provided by the official packages feed.
 
 echo
 echo "========== Package source update completed =========="
+
+echo
+echo "========== Verify package Makefiles =========="
+
+REQUIRED_MAKEFILES=(
+	"./luci-theme-aurora/Makefile"
+	"./luci-app-passwall/Makefile"
+	"./luci-app-lucky/Makefile"
+	"./luci-app-mosdns/Makefile"
+	"./luci-app-gecoosac/Makefile"
+)
+
+for MAKEFILE in "${REQUIRED_MAKEFILES[@]}"; do
+	if [[ ! -f "$MAKEFILE" ]]; then
+		echo "ERROR: required package Makefile does not exist: ${MAKEFILE}"
+		exit 1
+	fi
+
+	echo "Found: ${MAKEFILE}"
+done
